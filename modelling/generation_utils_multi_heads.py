@@ -440,6 +440,7 @@ class GenerationMixinCustom:
 
         model_kwargs["output_attentions"] = output_attentions
         model_kwargs["output_hidden_states"] = output_hidden_states
+        #model_kwargs['divergence_loss'] = divergence_loss
 
         if input_ids is None and "inputs_embeds" not in model_kwargs:
             # init `input_ids` with bos_token_id

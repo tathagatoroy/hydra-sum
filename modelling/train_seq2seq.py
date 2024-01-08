@@ -1,7 +1,12 @@
 """Copyright (c) 2021, salesforce.com, inc.
 All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause
-For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause"""
+For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
+code from the original hydrasum paper by goyal et al (SalesForce AI)
+comments added by BARD/ChatGPT and Tathagato
+modification by Tathagato
+
+"""
 
 import argparse
 import json
@@ -19,7 +24,8 @@ import single_head_utils
 import multi_head_utils_3
 import multi_head_utils
 from torch import nn
-
+import wandb
+import time
 from transformers import (
     AdamW,
     PreTrainedModel,
@@ -33,7 +39,9 @@ from transformers import (
     get_linear_schedule_with_warmup,
     get_polynomial_decay_schedule_with_warmup,
 )
+from transformers.utils import logging as transformers_logging
 
+transformers_logging.set_verbosity_error()
 logger = logging.getLogger(__name__)
 MODEL_CLASSES = {"bart": (BartConfig,
                           single_head_utils.ConditionalGenerationCustomBart,
@@ -51,86 +59,166 @@ MODEL_CLASSES = {"bart": (BartConfig,
 
 
 def set_seed(args):
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if args.n_gpu > 0:
+    """
+    Sets the random seed for various libraries (random, np, torch) for reproducible results.
+
+    Args:
+        args (argparse.Namespace): Training arguments containing the seed value.
+    """
+
+    random.seed(args.seed)  # set random seed for standard library
+    np.random.seed(args.seed)  # set random seed for numpy
+    torch.manual_seed(args.seed)  # set random seed for torch
+
+    if args.n_gpu > 0:  # set random seed for all GPUs
         torch.cuda.manual_seed_all(args.seed)
 
 
 def compute_accuracy_score(y_true, y_pred, ignore_ids=-1):
-    correct = 0.
-    total = 0.
-    for pred, gold in zip(y_pred, y_true):
-        if gold == ignore_ids:
-            continue
-        pred_label = np.argmax(pred)
-        if pred_label == gold:
-            correct += 1
-        total += 1
+    """
+    Calculates the accuracy score for a set of predictions and gold labels, ignoring specific labels.
 
-    return correct / total
+    Args:
+        y_true (list): List of ground truth labels.
+        y_pred (list): List of predicted labels.
+        ignore_ids (int, optional): Label ID to be ignored during accuracy calculation. Defaults to -1.
+
+    Returns:
+        float: The accuracy score.
+    """
+
+    correct, total = 0, 0  # initialize counters
+
+    for pred, gold in zip(y_pred, y_true):  # iterate over predictions and gold labels
+        if gold == ignore_ids:  # ignore labels with specific ID
+            continue
+
+        pred_label = np.argmax(pred)  # get the predicted label with highest probability
+
+        if pred_label == gold:  # compare predicted and gold labels
+            correct += 1  # increment correct predictions counter
+
+        total += 1  # update total number of valid labels
+
+    return correct / total  # calculate and return accuracy score
 
 
 def save_checkpoints(args, output_dir, model, tokenizer, suffix=None):
+    """
+    Saves the model and tokenizer checkpoints to a specified directory.
+
+    Args:
+        args (argparse.Namespace): Training arguments.
+        output_dir (str): Path to the directory where the checkpoints will be saved.
+        model (nn.Module): Trained model object.
+        tokenizer (PreTrainedTokenizer): Tokenizer used for pre-processing text data.
+        suffix (str, optional): Suffix to add to the output directory name. Defaults to None.
+    """
+    print("calling save checkpoints")
     if suffix is not None:
-        output_dir = os.path.join(output_dir, f'ckp_{suffix}')
-    if not os.path.exists(output_dir):
+        output_dir = os.path.join(output_dir, f'ckp_{suffix}')  # update output directory with suffix
+
+    if not os.path.exists(output_dir):  # create output directory if it does not exist
         os.makedirs(output_dir)
 
     model_to_save = (
         model.module if hasattr(model, "module") else model
-    )  # Take care of distributed/parallel training
-    model_to_save.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
+    )  # handle distributed/parallel training
 
-    torch.save(args, os.path.join(output_dir, "training_args.bin"))
-    logger.info("Saving model checkpoint to %s", output_dir)
+    model_to_save.save_pretrained(output_dir)  # save model
+    tokenizer.save_pretrained(output_dir)  # save tokenizer
+
+    torch.save(args, os.path.join(output_dir, "training_args.bin"))  # save training arguments
+    print("Saving model checkpoint to %s", output_dir)
+
+    logger.info("Saving model checkpoint to %s", output_dir)  # log information about saved checkpoints
 
 
 def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
+    """
+    Evaluates the model on the given dataset and saves the results.
+
+    Args:
+        args (argparse.Namespace): Training arguments.
+        eval_dataset (Dataset): Dataset for evaluation.
+        model (PreTrainedModel): Trained model object.
+        tokenizer (PreTrainedTokenizer): Tokenizer used for pre-processing text data.
+        prefix (str, optional): Prefix to add to the output directory and file names. Defaults to "".
+
+    Returns:
+        Dict: Dictionary containing evaluation results (loss, ppl)
+    """
+
     eval_output_dir = args.output_dir
 
     if not os.path.exists(eval_output_dir):
         os.makedirs(eval_output_dir)
 
+    # Set the batch size for evaluation
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+
+    # Create a sequential sampler for evaluation
+    # this is the default config of the sampler
+    # looks a a pytorch dataset not huggingface
     eval_sampler = SequentialSampler(eval_dataset)
+
+    # Build the data loader for evaluation
     eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
+    # Create a softmax function for calculating probabilities
     softmax_function = nn.Softmax(dim=-1)
 
-    # Eval!
-    logger.info("***** Running evaluation *****")
-    logger.info("  Num examples = %d", len(eval_dataset))
-    logger.info("  Batch size = %d", args.eval_batch_size)
+    # Set the model to evaluation mode
+    model.eval()
+
+    # Initialize evaluation variables
     eval_loss = 0.0
     eval_steps = 0
+    preds = None
+    decoder_ids_all = None
 
+    # Open a file to write posteriors if requested
+    # I think this computes some probabilities of tokens
     if args.dump_posteriors:
         f_out = open(os.path.join(eval_output_dir, 'prob_out%s.txt' % prefix), 'w')
 
     with torch.no_grad():
-        model.eval()
-
-        preds = None
-        decoder_ids_all = None
-
+        # Loop through the data loader
         for batch in tqdm(eval_dataloader, desc="Evaluating"):
+            # Move the batch to the specified device
             batch = tuple(t.to(args.device) for t in batch)
 
-            input_ids, attention, decoder_ids, decoder_attention, gate = batch[0], batch[1], batch[2], batch[3], batch[
-                4]
+            # Unpack the batch
+            input_ids, attention, decoder_ids, decoder_attention = batch[0], batch[1], batch[2], batch[3]
+
+            # Handle sentence gate if available
+            # what is sentence gate ? 
             try:
-                sent_gate = batch[5]
+                sent_gate = batch[4]
             except:
                 sent_gate = None
+            try :
+                overlap = batch[5]
+            except:
+                overlap = None
+            try :
+                overlap_bin = batch[6]
+            except:
+                overlap_bin = None
 
+            #set overlap and overlap_bin to None if not using them
+            overlap_bin = None
+            overlap = None
+
+
+            # Prepare the model inputs
+            #using overlap abstraction as gate probability
             inputs = {'input_ids': input_ids, 'attention_mask': attention, 'decoder_input_ids': decoder_ids,
                       'decoder_attention_mask': decoder_attention, 'generate': False,
-                      'use_gate_supervision': args.use_gate_supervision, 'gate': gate, 'sent_gate': sent_gate,
-                      'use_sentence_gate_supervision': args.use_sentence_gate_supervision}
+                      'use_gate_supervision': args.use_gate_supervision, 'gate': None, 'sent_gate': sent_gate,
+                      'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin,'use_overlap_supervision': args.overlap_supervision}
 
+            # Handle model-specific inputs
             if args.model_type in ['bart_mult_heads_2', 'bart_mult_heads_3']:
                 inputs['use_mixed'] = args.use_mixed
                 if not args.use_mixed and args.use_head is None:
@@ -138,9 +226,13 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
                     exit()
                 inputs['use_head'] = args.use_head
 
+            # Perform the forward pass
+            # gate supervision have different output format than other
             if args.use_gate_supervision:
                 outputs, _, gate_prob = model(**inputs)
 
+                # Accumulate gate predictions and labels
+                # first if is for initilization (first iteration)
                 if preds is None:
                     preds = gate_prob.detach().cpu().numpy()
                     out_label_ids_sent = gate.detach().cpu().numpy()
@@ -153,7 +245,10 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
             else:
                 outputs = model(**inputs)
 
+            # Calculate the loss
+            #sentence loss ?
             tmp_eval_loss_sentence = outputs.loss
+
             eval_loss += tmp_eval_loss_sentence.detach().cpu()
             eval_steps += 1
 
@@ -182,8 +277,8 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
 
                     f_out.write('\n\n')
 
-            if eval_steps > 200:
-                break
+            #if eval_steps > 200:
+            #    break
 
     if args.use_gate_supervision:
         preds = preds.reshape(-1, 2)
@@ -195,13 +290,14 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
     ppl = math.exp(eval_loss)
 
     if args.generate:
+        print("starting generation")
         f_out = open(os.path.join(eval_output_dir, '%s_outfinal.txt' % prefix), 'w')
         print(eval_output_dir)
 
         with torch.no_grad():
             model.eval()
             batch_num = 0
-            for batch in eval_dataloader:
+            for batch in tqdm(eval_dataloader):
 
                 batch = tuple(t.to(args.device) for t in batch)
                 input_ids, input_attention_mask, decoder_ids = batch[0], batch[1], batch[2]
@@ -212,18 +308,19 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
                     do_sample = False  # else the huggingface code returns same sequences
                 input_args = {'input_ids': input_ids,
                               'attention_mask': input_attention_mask,
-                              'num_beams': 6, 'length_penalty': 2, 'no_repeat_ngram_size': 3, 'max_length': 200,
+                              'num_beams': 5, 'length_penalty': 2, 'no_repeat_ngram_size': 3, 'max_length': 100,
                               'min_length': 12, 'top_k': 30, 'top_p': 0.5, 'do_sample': do_sample,
                               'decoder_start_token_id': tokenizer.bos_token_id,
                               'num_return_sequences': num_return_sequences}
 
-                if 'xsum' in args.input_dir:
-                    input_args = {'input_ids': input_ids,
-                                  'attention_mask': input_attention_mask,
-                                  'num_beams': 6, 'length_penalty': 1, 'no_repeat_ngram_size': 3, 'max_length': 60,
-                                  'min_length': 12, 'top_k': 30, 'top_p': 0.5, 'do_sample': do_sample,
-                                  'decoder_start_token_id': tokenizer.bos_token_id,
-                                  'num_return_sequences': num_return_sequences}
+                
+                # if 'xsum' in args.input_dir:
+                #     input_args = {'input_ids': input_ids,
+                #                   'attention_mask': input_attention_mask,
+                #                   'num_beams': 6, 'length_penalty': 1, 'no_repeat_ngram_size': 3, 'max_length': 60,
+                #                   'min_length': 12, 'top_k': 30, 'top_p': 0.5, 'do_sample': do_sample,
+                #                   'decoder_start_token_id': tokenizer.bos_token_id,
+                #                   'num_return_sequences': num_return_sequences}
 
                 if args.model_type in ['bart_mult_heads_2', 'bart_mult_heads_3']:
                     input_args['use_mixed'] = args.use_mixed
@@ -238,21 +335,21 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
                         exit()
 
                 gen_ids = model.generate(**input_args)
-
-                for j in range(len(input_ids)):
+                
+                for j in range(len(input_ids)): 
                     input = tokenizer.decode(input_ids[j], skip_special_tokens=True, clean_up_tokenization_spaces=False)
                     gold = tokenizer.decode(decoder_ids[j], skip_special_tokens=True,
                                             clean_up_tokenization_spaces=False)
 
                     f_out.write(input.strip() + '\n')
                     f_out.write(gold.strip() + '\n')
-
+                    #print("predicted summaries")
                     for k in range(num_return_sequences):
                         gen = tokenizer.decode(gen_ids[num_return_sequences * j + k],
                                                skip_special_tokens=True, clean_up_tokenization_spaces=False)
 
                         f_out.write(gen.strip() + '\n')
-                        print(gen)
+                        #print(gen)
                     f_out.write('\n')
 
                 batch_num += 1
@@ -275,19 +372,25 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
 
 
 def evaluate_and_save_model(args, eval_dataset, model, tokenizer, global_step, max_ppl):
-    result = evaluate(args, eval_dataset, model, tokenizer, global_step)
+    #global step is the number of epochs
+    # dynamically alter the 
+    #result = evaluate(args, eval_dataset, model, tokenizer, global_step)
     save_checkpoints(args, os.path.join(args.output_dir, global_step), model, tokenizer)
 
-    if result['ppl'] < max_ppl:
-        max_ppl = result['ppl']
+    #if result['ppl'] < max_ppl:
+    #    max_ppl = result['ppl']
         # save_checkpoints(args, os.path.join(args.output_dir, 'model-best'), model, tokenizer)
 
-    return max_ppl
+    #return max_ppl
 
-
+#@profile
 def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer):
     """ Train the model """
+    print("starting training function")
+    #reducing the size of the dataset for debugging
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+    print(args.train_batch_size)
+    print("size of the train dataset is : " + str(len(train_dataset)))
 
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
@@ -297,6 +400,9 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
         args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
     else:
         t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
+    print("freezing layers in main")
+    # freeze layers
+    model.freeze_weights()
 
     # Prepare optimizer and schedule (linear warmup and decay)
 
@@ -311,11 +417,14 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
          "weight_decay": 0.0},
     ]
 
+
+
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps,
                                                 num_training_steps=t_total)
 
     # multi-gpu training (should be after apex fp16 initialization)
+    print("num gpus : " + str(args.n_gpu))
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
@@ -332,7 +441,8 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
     logger.info("  Total optimization steps = %d", t_total)
 
     global_step = 0
-
+    epoch_divergence_loss = 0.0
+    epoch_masked_lm_loss = 0.0
     tr_loss = 0.0
     tr_gate_loss = 0.0
     logging_loss = 0.0
@@ -349,30 +459,82 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
     # alpha = 0.1
 
     num_epochs = 1
+    cur_epoch = 0
+    print("start iterating")
     for _ in train_iterator:
+        epoch_start_time = time.time()
+        cur_epoch += 1
+        print("start iterating for epoch : " + str(cur_epoch))
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
         for step, batch in enumerate(epoch_iterator):
 
             batch = tuple(t.to(args.device) for t in batch)
+            # input_ids, attention, decoder_ids, decoder_attention = batch[0], batch[1], batch[2], batch[3]
+            # gate = batch[4]
+            # try:
+            #     sent_gate = batch[5]
+            # except:
+            #     sent_gate = None
+
+            # inputs = {'input_ids': input_ids, 'attention_mask': attention, 'decoder_input_ids': decoder_ids,
+            #           'decoder_attention_mask': decoder_attention, 'generate': False,
+            #           'use_mixed': args.use_mixed, 'gate': gate, 'sent_gate': sent_gate,
+            #           'use_sentence_gate_supervision': args.use_sentence_gate_supervision}
+
+            # Unpack the batch
             input_ids, attention, decoder_ids, decoder_attention = batch[0], batch[1], batch[2], batch[3]
-            gate = batch[4]
+
+            # Handle sentence gate if available
+            # what is sentence gate ? 
             try:
-                sent_gate = batch[5]
+                sent_gate = batch[4]
             except:
                 sent_gate = None
+            try :
+                overlap = batch[5]
+            except:
+                overlap = None
+            try :
+                overlap_bin = batch[6]
+            except:
+                overlap_bin = None
 
+
+            # Prepare the model inputs
             inputs = {'input_ids': input_ids, 'attention_mask': attention, 'decoder_input_ids': decoder_ids,
                       'decoder_attention_mask': decoder_attention, 'generate': False,
-                      'use_mixed': args.use_mixed, 'gate': gate, 'sent_gate': sent_gate,
-                      'use_sentence_gate_supervision': args.use_sentence_gate_supervision}
+                      'use_gate_supervision': args.use_gate_supervision, 'gate': None, 'sent_gate': sent_gate,
+                      'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin, 'use_overlap_supervision': args.overlap_supervision}
 
-            if args.use_gate_supervision:
+
+            if args.use_mixed and args.divergence_loss is not None:
+                inputs = {'input_ids': input_ids, 'attention_mask': attention, 'decoder_input_ids': decoder_ids,
+                        'decoder_attention_mask': decoder_attention, 'generate': False,
+                        'use_gate_supervision': args.use_gate_supervision, 'gate': None, 'sent_gate': sent_gate,
+                        'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin,
+                        "divergence_loss": args.divergence_loss, "divergence_weight": args.divergence_weight, 'use_overlap_supervision': args.overlap_supervision}
+                outputs, divergence_loss , masked_lm_loss = model(**inputs)
+                #print("divergence loss : " + str(divergence_loss))
+                #print("masked lm loss : " + str(masked_lm_loss))
+                #print("total loss : " + str(outputs.loss.item()))
+
+                #log the 3 losses
+                wandb.log({"divergence_loss": divergence_loss, "masked_lm_loss": masked_lm_loss, "total_loss": outputs.loss.item()})
+
+                
+
+            elif args.use_gate_supervision:
                 inputs['use_gate_supervision'] = True
                 outputs, gate_loss, _ = model(**inputs)
             else:
                 outputs = model(**inputs)
 
             loss = outputs.loss
+            
+            if args.use_mixed and args.divergence_loss is not None:
+                epoch_divergence_loss += divergence_loss
+                epoch_masked_lm_loss += masked_lm_loss
+
             #print(loss)
 
             tr_loss += loss.item()
@@ -424,7 +586,11 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
             if 0 < args.max_steps < global_step:
                 epoch_iterator.close()
                 break
-
+        #epoch done
+        epoch_end_time = time.time()
+        print("epoch time : " + str(epoch_end_time - epoch_start_time))
+        print("epoch done")
+        print("calling evaluate and save model")
         evaluate_and_save_model(args, eval_dataset, model, tokenizer, str(num_epochs), max_ppl)
         num_epochs += 1
 
@@ -461,28 +627,25 @@ def main():
         "--output_dir",
         default=None,
         type=str,
-        required=True,
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
         "--eval_data_file",
-        default=None,
+        default="./../data/cnn_dailymail_val.csv",
         type=str,
-        required=True,
         help="Evaluation data file to evaluate the perplexity on (a text file).",
     )
     parser.add_argument(
         "--train_data_file",
-        default=None,
+        default="./../data/cnn_dailymail_train.csv",
         type=str,
-        required=True,
         help="The input training data file (a text file)."
     )
+
     parser.add_argument(
         "--test_data_file",
-        default=None,
+        default="./../data/cnn_dailymail_test.csv",
         type=str,
-        required=True,
         help="The input test data file (a text file)."
     )
     parser.add_argument(
@@ -507,8 +670,8 @@ def main():
     )
     parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
     parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the test set.")
-    parser.add_argument("--per_gpu_train_batch_size", default=32, type=int, help="Batch size training.", )
-    parser.add_argument("--per_gpu_eval_batch_size", default=32, type=int, help="Batch size evaluation.", )
+    parser.add_argument("--per_gpu_train_batch_size", default=8, type=int, help="Batch size training.", )
+    parser.add_argument("--per_gpu_eval_batch_size", default=8, type=int, help="Batch size evaluation.", )
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="No. steps before backward/update", )
     parser.add_argument("--num_train_epochs", default=3.0, type=float, help="Total number of training epochs", )
     parser.add_argument("--max_steps", default=-1, type=int, help="If>0: no. train steps. Override num_train_epochs.", )
@@ -522,6 +685,8 @@ def main():
     parser.add_argument("--overwrite_output_dir", action="store_true", help="Overwrite the output directory", )
     parser.add_argument("--overwrite_cache", action="store_true", help="Overwrite the cached data sets", )
     parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
+    parser.add_argument("--cache_directory", type=str, default="./cache", help="cache directory")
+    
 
     # custom flags
     parser.add_argument("--generate", action="store_true", help="Generate summaries for dev set", )
@@ -534,8 +699,23 @@ def main():
     parser.add_argument("--gate_probability", type=float, default=None, help="gate prob")
     parser.add_argument("--subpop", type=int, default=0, help="subpopulation to train on")
     parser.add_argument("--use_sentence_gate_supervision", action="store_true", help="use sentence gating")
+    parser.add_argument("--train_data_size", type=int, default=-1, help="size of training data")
+    parser.add_argument("--eval_data_size", type=int, default=-1, help="size of eval data")
+    parser.add_argument("--test_data_size", type=int, default=-1, help="size of test data")
+    parser.add_argument("--num_bins", type=int, default=10, help="number of bins for dividing the controllable scoring")
+    parser.add_argument("--divergence_loss", type = str, default = None , help = "divergence loss to use") # should be either kl or cosine
+    parser.add_argument("--divergence_weight", type = float, default = 0.2, help = "weight for divergence loss")
+    parser.add_argument("--experiment_name", type = str, default = "default", help = "name of the experiment")
+    parser.add_argument("--overlap_supervision", action="store_true", help="use overlap score as gate probability")
 
+    # divergence for now can be only kl or cosine
+    # divergence weight is the amount of weight to give the loss 
     args = parser.parse_args()
+
+    #intialize wandb
+    wandb.init(project="hydra-sum", name=args.experiment_name)
+    wandb.config.update(args)
+
 
     if (
             os.path.exists(args.output_dir)
@@ -549,6 +729,8 @@ def main():
             )
         )
 
+    if not os.path.exists(args.cache_directory):
+        os.makedirs(args.cache_directory)
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
@@ -571,6 +753,7 @@ def main():
     print('Starting...')
     if args.input_dir is not None:
         print('loading model')
+        print("from args.input_dir : " + str(args.input_dir))
         tokenizer = tokenizer_class.from_pretrained(args.input_dir)
         model = model_class.from_pretrained(args.input_dir)
 
@@ -582,7 +765,7 @@ def main():
     else:
         config = config_class.from_pretrained(args.model_name_or_path)
         tokenizer = tokenizer_class.from_pretrained(args.model_name_or_path)
-
+        config.num_bins = args.num_bins
         model = model_class.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
@@ -591,25 +774,32 @@ def main():
         if args.model_type in ['bart_mult_heads_2', 'pegasus_mult_heads', 'bart_mult_heads_3']:
             print(f'Using mixture of experts w/ {args.num_decoder_layers_shared} shared layers in decoder..')
             config.num_decoder_layers_shared = args.num_decoder_layers_shared
+            config.num_bins = args.num_bins
             args.use_mixed = True  # Set this as true for training, evaluation can be controlled
             model.initialize_correct_weights(config, num_decoder_layers_shared=args.num_decoder_layers_shared)
 
     model.to(args.device)
 
     logger.info("Training/evaluation parameters %s", args)
-
-    if args.do_eval:
-        test_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'test')
-        evaluate(args, test_dataset, model, tokenizer, 'test')
-        exit()
-
+    #test_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'test')
+    train_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'train')
     eval_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'dev')
-    evaluate(args, eval_dataset, model, tokenizer, 'dev')
+    if args.do_eval:
+        #test_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'test')
+        print("start evaluation")
+        evaluate(args, eval_dataset, model, tokenizer, 'test')
+
+    
+    #eval_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'dev')
+    #evaluate(args, eval_dataset, model, tokenizer, 'dev')
 
     if args.do_train:
-        train_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'train')
+        print("start loading trainset with dataset size : {0}".format(len(train_dataset)))
         print('Starting training..')
         train(args, train_dataset, eval_dataset, model, tokenizer)
+        print('Done training..')
+        print('Evaluating on val set..')
+        #evaluate(args, eval_dataset, model, tokenizer, 'dev')
 
 
 if __name__ == "__main__":

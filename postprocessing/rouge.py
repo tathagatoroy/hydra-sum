@@ -105,13 +105,11 @@ def rouge_results_to_str(results_dict):
     )
 
 
-def read_file(input_file):
-    lines = [l.strip() for l in input_file.readlines()]
+def read_file(input_dict):
 
     inputs = []
     candidates = []
     references = []
-    num_line_per_ex = 4
 
     for i in range(0, len(lines), num_line_per_ex):
         input = lines[i].strip()
@@ -125,6 +123,12 @@ def read_file(input_file):
         references.append(gold)
 
     return inputs, references, candidates
+
+def compute_rouge(input_dict):
+    inputs, references, candidates = read_file(input_dict)
+    results_dict = test_rouge(candidates, references, 6)
+    print(rouge_results_to_str(results_dict))
+
 
 """
 def get_tokenized(text):

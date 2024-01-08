@@ -8,10 +8,12 @@ from transformers import PreTrainedModel, BartModel, BartConfig, BartPretrainedM
 from transformers.modeling_outputs import Seq2SeqLMOutput, Seq2SeqModelOutput, BaseModelOutput
 from torch import nn
 import train_seq2seq_utils
+from train_seq2seq_utils import skld_loss, cosine_similarity
 from transformers.models.bart.modeling_bart import BartEncoder, BartDecoder
 import torch.nn.functional as F
 import copy
 from generation_utils_multi_heads import GenerationMixinCustom
+
 
 
 class BartModelMultHeads(BartPretrainedModel):
@@ -19,6 +21,7 @@ class BartModelMultHeads(BartPretrainedModel):
         super().__init__(config)
 
         padding_idx, vocab_size = config.pad_token_id, config.vocab_size
+        
         self.shared = nn.Embedding(vocab_size, config.d_model, padding_idx)
 
         self.encoder = BartEncoder(config, self.shared)
@@ -27,7 +30,10 @@ class BartModelMultHeads(BartPretrainedModel):
 
         self.num_decoder_layers_shared = None
 
-        self.head_selector = nn.Linear(config.d_model, 2, bias=False)
+        self.head_selector = nn.Linear(config.d_model, 2, bias=False) # this should be num of decoders
+        self.feature_embedding = nn.Embedding(config.num_bins, config.d_model) # this scales the feature score to the same dimension as the decoder output
+        self.feature_score = nn.Linear(config.d_model, 2, bias=True) # this should be num of decoders
+
 
         self.init_weights()
 
@@ -68,10 +74,13 @@ class BartModelMultHeads(BartPretrainedModel):
             return_dict=None,
             use_mixed=True,
             use_head=0,
+            overlap_bin = None,  # this is int with range(0,9) which denotes the bin the abstractivity
+            
     ):
 
         # different to other models, Bart automatically creates decoder_input_ids from
         # input_ids if no decoder_input_ids are provided
+        # but decoder id is ideally provid
         if decoder_input_ids is None and decoder_inputs_embeds is None:
             decoder_input_ids = train_seq2seq_utils.shift_tokens_right(
                 input_ids, self.config.pad_token_id, self.config.decoder_start_token_id
@@ -120,8 +129,17 @@ class BartModelMultHeads(BartPretrainedModel):
             decoder_outputs = self.decoder(**decoder_args)
             decoder_outputs1 = self.decoder1(**decoder_args)
 
-            decoder_layer_common_output = decoder_outputs.hidden_states[self.num_decoder_layers_shared]
-            logits = self.head_selector(decoder_layer_common_output)
+
+
+
+            decoder_layer_common_output = decoder_outputs.hidden_states[self.num_decoder_layers_shared] #B, L, D
+            logits = self.head_selector(decoder_layer_common_output) # this (B, L, 2)
+            # if overlap_bin is not None:
+            #     overlap_embedding = self.feature_embedding(overlap_bin) #(Batch_Size, L)
+            #     overlap_score = self.feature_score(overlap_embedding)   #(Batch_Size, 2)
+            #     #unsqueeze to (Batch_Size, 1, 2)
+            #     overlap_score = overlap_score.unsqueeze(1)
+            #     logits = overlap_score * logits # (Batch_Size, L, 2)
             prob_head_selector = nn.functional.softmax(logits, dim=-1)
 
             return Seq2SeqModelOutput(
@@ -153,6 +171,8 @@ class BartModelMultHeads(BartPretrainedModel):
 
             if not return_dict:
                 print('NEEDS TO BE IMPLEMENTED: Generation_mutlhead_utils. Use return_dict')
+                # raise not implemented error
+                raise NotImplementedError
                 exit()
 
             return Seq2SeqModelOutput(
@@ -191,6 +211,7 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
         self.model.num_decoder_layers_shared = num_decoder_layers_shared
 
     def freeze_weights(self):
+        print("freezing weights")
         self.model.encoder.requires_grad_(False)
         for k in range(self.model.num_decoder_layers_shared):
             self.model.decoder.layers[k].requires_grad_(False)
@@ -217,6 +238,11 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
             gate_prob=None,
             use_sentence_gate_supervision=False,
             sent_gate=None,
+            overlap = None,
+            overlap_bin = None, # this is int with range(0,9)
+            divergence_loss=None,
+            divergence_weight=None,
+            use_overlap_supervision = False,
             **unused,
     ):
         if "lm_labels" in unused:
@@ -238,7 +264,8 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
                       'output_hidden_states': output_hidden_states,
                       'return_dict': return_dict,
                       'use_mixed': use_mixed,
-                      'use_head': use_head}
+                      'use_head': use_head,
+                      'overlap_bin': overlap_bin}
 
         if use_mixed:
             outputs, outputs1, prob_head_selector = self.model.forward(**input_args)
@@ -248,9 +275,40 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
             softmax_0 = F.softmax(lm_logits0, dim=-1)
             softmax_1 = F.softmax(lm_logits1, dim=-1)
 
+            #apply kl divergence loss here 
+            # unlikely to be well conditioned as maximizing is not clear, maybe something like max(0,cos(softmax_0, softmax_1)) is a better divergence loss
+            if divergence_loss is not None:
+                if divergence_loss == 'kl':
+                    divergence_loss = skld_loss(softmax_0, softmax_1)
+                elif divergence_loss == 'cosine':
+                    divergence_loss = cosine_similarity(softmax_0, softmax_1)
+                else:
+                    print(f'loss {divergence_loss} not implemented')
+                    raise NotImplementedError
+                    exit()
+
+
+
             if gate_prob is not None:
                 softmax_0 = softmax_0 * gate_prob
                 softmax_1 = softmax_1 * (1 - gate_prob)
+            elif use_overlap_supervision:
+                #assert that if overlap is none , give error 
+                assert overlap is not None, 'overlap is none'
+                print("using overlap supervision")
+                #convert shape (Batch) ot (Batch,1,1)
+                overlap_gate = overlap.unsqueeze(1).unsqueeze(2)
+                softmax_0 = softmax_0 * (1 - overlap_gate)
+                softmax_1 = softmax_1 * overlap_gate
+            elif use_gate_supervision:
+                #assert that if overlap is none , give error 
+                assert overlap is not None, 'overlap is none'
+                print("using gate supervision")
+                prob_0 = 1 - overlap
+                prob_1 = overlap
+                softmax_0 = softmax_0 * prob_0
+                softmax_1 = softmax_1 * prob_1
+
             elif use_sentence_gate_supervision:
                 # softmax_0 = torch.mul(softmax_0, (1 - sent_gate).unsqueeze(1).unsqueeze(2))
                 # softmax_1 = torch.mul(softmax_1, sent_gate.unsqueeze(1).unsqueeze(2))
@@ -260,10 +318,11 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
                 #print(softmax_0)
                 #print(softmax_1)
             else:
-                prob0 = prob_head_selector[:, :, 0].unsqueeze(2)
-                prob1 = prob_head_selector[:, :, 1].unsqueeze(2)
-                softmax_0 = torch.mul(softmax_0, prob0)
-                softmax_1 = torch.mul(softmax_1, prob1)
+                #prob0 is (B, L, 2)
+                prob0 = prob_head_selector[:, :, 0].unsqueeze(2) # (B, L, 1)
+                prob1 = prob_head_selector[:, :, 1].unsqueeze(2) # (B, L, 1)
+                softmax_0 = torch.mul(softmax_0, prob0)  # (B, L, V) as softmax is (B, L, V)
+                softmax_1 = torch.mul(softmax_1, prob1) # (B, L, V) as softmax is (B, L, V)
 
             lm_logits = torch.log(F.relu(softmax_0 + softmax_1) + 1e-6)  # TODO: This is not logits, rename
         else:
@@ -278,8 +337,12 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
 
             loss_fct = nn.NLLLoss(ignore_index=1)
             masked_lm_loss = loss_fct(lm_logits.view(-1, self.config.vocab_size), lm_labels.view(-1))
-
+            if use_mixed and divergence_loss is not None:
+                total_loss = masked_lm_loss + divergence_weight * divergence_loss
+            # I am not using gate supervision here
             if use_mixed and use_gate_supervision:
+                #negative log likelyhood loss
+
                 loss_fct_gate = nn.NLLLoss(ignore_index=-1)
                 gate_loss = loss_fct_gate(torch.log(prob_head_selector.view(-1, 2)), gate.view(-1))
 
@@ -287,7 +350,7 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
             output = (lm_logits,) + outputs[1:]
             return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
 
-        if use_mixed:
+        if use_mixed and divergence_loss is None:
             return_output = Seq2SeqLMOutput(
                             loss=masked_lm_loss,
                             logits=lm_logits,
@@ -295,6 +358,17 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
                             encoder_hidden_states=outputs.encoder_hidden_states,
                             encoder_attentions=outputs.encoder_attentions
                             )
+        elif use_mixed and divergence_loss is not None:
+            return_output = Seq2SeqLMOutput(
+                            loss=total_loss,
+                            logits=lm_logits,
+                            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+                            encoder_hidden_states=outputs.encoder_hidden_states,
+                            encoder_attentions=outputs.encoder_attentions
+                            )
+                
+            return return_output, divergence_loss, masked_lm_loss
+        
         else:
             return_output = Seq2SeqLMOutput(
                             loss=masked_lm_loss,
@@ -307,7 +381,8 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
                             encoder_hidden_states=outputs.encoder_hidden_states,
                             encoder_attentions=outputs.encoder_attentions,
                             )
-
+ 
+        #will not reach if use gate supervision and use mixed is true
         if use_gate_supervision:
             return return_output, gate_loss, prob_head_selector
         else:
