@@ -153,12 +153,12 @@ dmypy.json
 cython_debug/
 
 #folders I want to ignore
-./data
-./modelling/__pycache__
-./modelling/outputs
-./modelling/original_outputs
-./modelling/cache
-./modelling/wandb
+./data/
+./modelling/__pycache__/
+./modelling/outputs/
+./modelling/original_outputs/
+./modelling/cache/
+./modelling/wandb/
 
 #files I want to ignore
 #all txt files
@@ -167,10 +167,10 @@ cython_debug/
 *.log
 #all output files
 *.out
-outputs
-./modelling/original_outputs
-./modelling/cache
-./modelling/wandb
+#outputs
+#./modelling/original_outputs
+#./modelling/cache
+#./modelling/wandb
 
 #files I want to ignore
 #all txt files
