@@ -1,10 +1,10 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 data/
-cache/
-wandb/
-outputs/
-original_outputs/
+modelling/cache/
+modelling/wandb/
+modelling/outputs/
+modelling/original_outputs/
 *.py[cod]
 *$py.class
 
