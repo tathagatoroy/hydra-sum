@@ -4,9 +4,10 @@
 #SBATCH --gres=gpu:4
 #SBATCH --mem-per-cpu=3000M
 #SBATCH --time=4-00:00:00
-#SBATCH --job-name=experiments_with_overlap_supervision
-#SBATCH --output=outputs.out
+#SBATCH --job-name=gate_probability
+#SBATCH --output=gate_outputs.out
 #SBATCH -w gnode075
+
 
 # Discord notifs on start and end
 source notify

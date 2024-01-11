@@ -13,7 +13,7 @@ python3 -m memory_profiler train_seq2seq.py \
     --per_gpu_eval_batch_size 4 \
     --per_gpu_train_batch_size 4 \
     --gradient_accumulation_steps=1 \
-    --num_train_epochs 2 \
+    --num_train_epochs 8 \
     --learning_rate 1e-5 \
     --output_dir "/scratch/tathagato/overlap_supervision_div_loss_0" \
     --overwrite_output_dir \

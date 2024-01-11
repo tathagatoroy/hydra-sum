@@ -45,6 +45,28 @@ def skld_loss(prob1, prob2):
 
     return -torch.mean((kl_div_12 + kl_div_21) / 2.0)
 
+
+def cosine_similarity_on_features(features1, features2):
+    """
+    Calculates the cosine distance between two output hidden states from the deocder of the model.
+    
+    Args:
+        features1: torch.Tensor of shape (batch_size, max_decoder_length, hidden_size) with hidden states.
+        features2: torch.Tensor of shape (batch_size, max_decoder_length, hidden_size)
+    """
+    # make it batch_size , max_decoder_length * hidden_size
+    features1 = features1.view(features1.shape[0], -1)
+    features2 = features2.view(features2.shape[0], -1)
+    # normalize the features
+    features1 = nn.functional.normalize(features1, dim=1)
+    features2 = nn.functional.normalize(features2, dim=1)
+    # calculate the cosine similarity
+    cosine_similarity = torch.sum(features1 * features2, dim=1)
+    # return the mean of the cosine similarity for each sample  
+    cosine_similarity = torch.mean(cosine_similarity)
+    return cosine_similarity
+
+
 def cosine_similarity(prob1, prob2):
     """
     Calculates the cosine distance between two softmax-normalized probability distributions.

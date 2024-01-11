@@ -8,7 +8,7 @@ from transformers import PreTrainedModel, BartModel, BartConfig, BartPretrainedM
 from transformers.modeling_outputs import Seq2SeqLMOutput, Seq2SeqModelOutput, BaseModelOutput
 from torch import nn
 import train_seq2seq_utils
-from train_seq2seq_utils import skld_loss, cosine_similarity
+from train_seq2seq_utils import skld_loss, cosine_similarity, cosine_similarity_on_features
 from transformers.models.bart.modeling_bart import BartEncoder, BartDecoder
 import torch.nn.functional as F
 import copy
@@ -243,6 +243,12 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
             divergence_loss=None,
             divergence_weight=None,
             use_overlap_supervision = False,
+            use_distance_loss_pre_lm_layer = False,
+            use_distance_loss_post_lm_layer = False,
+            use_one_head_distance_loss = False,
+            use_two_head_distance_loss = False,
+            use_feature_level_gating = False,
+            use_last_layer_gating = True,
             **unused,
     ):
         if "lm_labels" in unused:
@@ -269,6 +275,10 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
 
         if use_mixed:
             outputs, outputs1, prob_head_selector = self.model.forward(**input_args)
+            #this F.Linear computes the logits from the decoder output using a linear layer which is the same as the nn.Embedding weight
+            #print("shape of outputs : {0} ".format(outputs[0].shape))
+            #output shape is (B, L, D)
+
             lm_logits0 = F.linear(outputs[0], self.model.shared.weight, bias=self.final_logits_bias)
             lm_logits1 = F.linear(outputs1[0], self.model.shared.weight, bias=self.final_logits_bias)
 
@@ -277,15 +287,8 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
 
             #apply kl divergence loss here 
             # unlikely to be well conditioned as maximizing is not clear, maybe something like max(0,cos(softmax_0, softmax_1)) is a better divergence loss
-            if divergence_loss is not None:
-                if divergence_loss == 'kl':
-                    divergence_loss = skld_loss(softmax_0, softmax_1)
-                elif divergence_loss == 'cosine':
-                    divergence_loss = cosine_similarity(softmax_0, softmax_1)
-                else:
-                    print(f'loss {divergence_loss} not implemented')
-                    raise NotImplementedError
-                    exit()
+
+
 
 
 
@@ -295,7 +298,7 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
             elif use_overlap_supervision:
                 #assert that if overlap is none , give error 
                 assert overlap is not None, 'overlap is none'
-                print("using overlap supervision")
+                #print("using overlap supervision")
                 #convert shape (Batch) ot (Batch,1,1)
                 overlap_gate = overlap.unsqueeze(1).unsqueeze(2)
                 softmax_0 = softmax_0 * (1 - overlap_gate)
@@ -303,7 +306,7 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
             elif use_gate_supervision:
                 #assert that if overlap is none , give error 
                 assert overlap is not None, 'overlap is none'
-                print("using gate supervision")
+                #print("using gate supervision")
                 prob_0 = 1 - overlap
                 prob_1 = overlap
                 softmax_0 = softmax_0 * prob_0
@@ -333,6 +336,56 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
         masked_lm_loss = None
         gate_loss = None
         if not generate:
+                        
+            if divergence_loss is not None:
+                if use_distance_loss_post_lm_layer:
+                    if divergence_loss == 'kl':
+                        if use_one_head_distance_loss:
+                            softmax_0_detached = softmax_0.detach()
+                            divergence_loss = skld_loss(softmax_0_detached, softmax_1)
+                        elif use_two_head_distance_loss:
+                            divergence_loss = skld_loss(softmax_0, softmax_1)
+                        #divergence_loss = skld_loss(softmax_0, softmax_1)
+                    elif divergence_loss == 'cosine':
+                        if use_one_head_distance_loss:
+                            softmax_0_detached = softmax_0.detach()
+                            divergence_loss = cosine_similarity(softmax_0_detached, softmax_1)
+                        elif use_two_head_distance_loss:
+                            divergence_loss = cosine_similarity(softmax_0, softmax_1)
+                        #divergence_loss = cosine_similarity(softmax_0, softmax_1)
+                    else:
+                        print(f'loss {divergence_loss} not implemented')
+                        raise NotImplementedError
+                        exit()
+                elif use_distance_loss_pre_lm_layer:
+                    if divergence_loss == 'kl':
+                        if use_one_head_distance_loss:
+                            feature_1 = outputs[0]
+                            feature_2 = outputs1[0]
+                            feature_1_detached = feature_1.detach()
+                            divergence_loss = skld_loss(feature_1_detached, feature_2)
+                        elif use_two_head_distance_loss:
+                            feature_1 = outputs[0]
+                            feature_2 = outputs1[0]
+                            divergence_loss = skld_loss(feature_1, feature_2)
+
+                        #divergence_loss = skld_loss(softmax_0, softmax_1)
+                    elif divergence_loss == 'cosine':
+                        if use_one_head_distance_loss:
+                            feature_1 = outputs[0]
+                            feature_2 = outputs1[0]
+                            feature_1_detached = feature_1.detach()
+                            divergence_loss = cosine_similarity_on_features(feature_1_detached, feature_2)
+                        elif use_two_head_distance_loss:
+                            feature_1 = outputs[0]
+                            feature_2 = outputs1[0]
+                            divergence_loss = cosine_similarity_on_features(feature_1, feature_2)
+
+                        #divergence_loss = cosine_similarity(softmax_0, softmax_1)
+                    else:
+                        print(f'loss {divergence_loss} not implemented')
+                        raise NotImplementedError
+                        exit()
             lm_labels = train_seq2seq_utils.shift_tokens_left(decoder_input_ids, 1)
 
             loss_fct = nn.NLLLoss(ignore_index=1)

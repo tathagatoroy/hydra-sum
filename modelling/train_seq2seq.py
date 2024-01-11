@@ -40,6 +40,12 @@ from transformers import (
     get_polynomial_decay_schedule_with_warmup,
 )
 from transformers.utils import logging as transformers_logging
+os.environ["WANDB_SILENT"] = "true"
+#currently using giving issues with training 
+#setting wandb to run in offline mode
+os.environ["WANDB_MODE"] = "offline"
+
+
 
 transformers_logging.set_verbosity_error()
 logger = logging.getLogger(__name__)
@@ -149,7 +155,7 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
         Dict: Dictionary containing evaluation results (loss, ppl)
     """
 
-    eval_output_dir = args.output_dir
+    eval_output_dir = args.generation_output_directory
 
     if not os.path.exists(eval_output_dir):
         os.makedirs(eval_output_dir)
@@ -213,10 +219,19 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
 
             # Prepare the model inputs
             #using overlap abstraction as gate probability
+            # inputs = {'input_ids': input_ids, 'attention_mask': attention, 'decoder_input_ids': decoder_ids,
+            #           'decoder_attention_mask': decoder_attention, 'generate': False,
+            #           'use_gate_supervision': args.use_gate_supervision, 'gate': None, 'sent_gate': sent_gate,
+            #           'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin,'use_overlap_supervision': args.overlap_supervision}
             inputs = {'input_ids': input_ids, 'attention_mask': attention, 'decoder_input_ids': decoder_ids,
                       'decoder_attention_mask': decoder_attention, 'generate': False,
                       'use_gate_supervision': args.use_gate_supervision, 'gate': None, 'sent_gate': sent_gate,
-                      'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin,'use_overlap_supervision': args.overlap_supervision}
+                      'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin,
+                      "divergence_loss": None, "divergence_weight": None , 'use_overlap_supervision': False,
+                      "use_mixed" : args.use_mixed, "use_head" : args.use_head, "gate_prob" : args.gate_probability, "use_one_head_distance_loss" : False,
+                      "use_distance_loss_pre_lm_layer" : False , "use_distance_loss_post_lm_layer" : False, 
+                      "use_last_layer_gating" : False, "use_feature_level_gating" : False, 
+                      "use_two_head_distance_loss" : False}
 
             # Handle model-specific inputs
             if args.model_type in ['bart_mult_heads_2', 'bart_mult_heads_3']:
@@ -308,7 +323,7 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
                     do_sample = False  # else the huggingface code returns same sequences
                 input_args = {'input_ids': input_ids,
                               'attention_mask': input_attention_mask,
-                              'num_beams': 5, 'length_penalty': 2, 'no_repeat_ngram_size': 3, 'max_length': 100,
+                              'num_beams': 6, 'length_penalty': 2, 'no_repeat_ngram_size': 3, 'max_length': 100,
                               'min_length': 12, 'top_k': 30, 'top_p': 0.5, 'do_sample': do_sample,
                               'decoder_start_token_id': tokenizer.bos_token_id,
                               'num_return_sequences': num_return_sequences}
@@ -458,13 +473,12 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
     torch.cuda.empty_cache()
     # alpha = 0.1
 
-    num_epochs = 1
-    cur_epoch = 0
+    #num_epochs = 1
     print("start iterating")
     for _ in train_iterator:
         epoch_start_time = time.time()
-        cur_epoch += 1
-        print("start iterating for epoch : " + str(cur_epoch))
+        print("start iterating for epoch : " + str(args.current_epoch))
+        args.current_epoch += 1
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
         for step, batch in enumerate(epoch_iterator):
 
@@ -501,25 +515,30 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
 
 
             # Prepare the model inputs
+            # inputs = {'input_ids': input_ids, 'attention_mask': attention, 'decoder_input_ids': decoder_ids,
+            #           'decoder_attention_mask': decoder_attention, 'generate': False,
+            #           'use_gate_supervision': args.use_gate_supervision, 'gate': None, 'sent_gate': sent_gate,
+            #           'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin, 'use_overlap_supervision': args.overlap_supervision}
+
+
+            #if args.use_mixed and args.divergence_loss is not None:
             inputs = {'input_ids': input_ids, 'attention_mask': attention, 'decoder_input_ids': decoder_ids,
-                      'decoder_attention_mask': decoder_attention, 'generate': False,
-                      'use_gate_supervision': args.use_gate_supervision, 'gate': None, 'sent_gate': sent_gate,
-                      'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin, 'use_overlap_supervision': args.overlap_supervision}
-
-
-            if args.use_mixed and args.divergence_loss is not None:
-                inputs = {'input_ids': input_ids, 'attention_mask': attention, 'decoder_input_ids': decoder_ids,
-                        'decoder_attention_mask': decoder_attention, 'generate': False,
-                        'use_gate_supervision': args.use_gate_supervision, 'gate': None, 'sent_gate': sent_gate,
-                        'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin,
-                        "divergence_loss": args.divergence_loss, "divergence_weight": args.divergence_weight, 'use_overlap_supervision': args.overlap_supervision}
-                outputs, divergence_loss , masked_lm_loss = model(**inputs)
+                    'decoder_attention_mask': decoder_attention, 'generate': False,
+                    'use_gate_supervision': args.use_gate_supervision, 'gate': None, 'sent_gate': sent_gate,
+                    'use_sentence_gate_supervision': args.use_sentence_gate_supervision, 'overlap': overlap, 'overlap_bin': overlap_bin,
+                    "divergence_loss": args.divergence_loss, "divergence_weight": args.divergence_weight, 'use_overlap_supervision': args.overlap_supervision,
+                    "use_mixed" : True, "use_head" : False, "gate_prob" : args.gate_probability, "use_one_head_distance_loss" : args.use_one_head_distance_loss,
+                    "use_distance_loss_pre_lm_layer" : args.use_distance_loss_pre_lm_layer, "use_distance_loss_post_lm_layer" : args.use_distance_loss_post_lm_layer, 
+                    "use_last_layer_gating" : args.use_last_layer_gating, "use_feature_level_gating" : args.use_feature_level_gating, 
+                    "use_two_head_distance_loss" : args.use_two_head_distance_loss}
                 #print("divergence loss : " + str(divergence_loss))
                 #print("masked lm loss : " + str(masked_lm_loss))
                 #print("total loss : " + str(outputs.loss.item()))
 
                 #log the 3 losses
-                wandb.log({"divergence_loss": divergence_loss, "masked_lm_loss": masked_lm_loss, "total_loss": outputs.loss.item()})
+            if args.use_mixed and args.divergence_loss is not None:
+                    outputs, divergence_loss , masked_lm_loss = model(**inputs)
+                    wandb.log({"divergence_loss": divergence_loss, "masked_lm_loss": masked_lm_loss, "total_loss": outputs.loss.item()})
 
                 
 
@@ -591,8 +610,8 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
         print("epoch time : " + str(epoch_end_time - epoch_start_time))
         print("epoch done")
         print("calling evaluate and save model")
-        evaluate_and_save_model(args, eval_dataset, model, tokenizer, str(num_epochs), max_ppl)
-        num_epochs += 1
+        evaluate_and_save_model(args, eval_dataset, model, tokenizer, str(args.current_epoch), max_ppl)
+        #num_epochs += 1
 
         if 0 < args.max_steps < global_step:
             train_iterator.close()
@@ -707,10 +726,23 @@ def main():
     parser.add_argument("--divergence_weight", type = float, default = 0.2, help = "weight for divergence loss")
     parser.add_argument("--experiment_name", type = str, default = "default", help = "name of the experiment")
     parser.add_argument("--overlap_supervision", action="store_true", help="use overlap score as gate probability")
+    parser.add_argument("--use_one_head_distance_loss", action="store_true", help="use distance loss for one head")
+    parser.add_argument("--use_two_head_distance_loss", action="store_true", help="use distance loss for two head")
+    parser.add_argument("--use_distance_loss_pre_lm_layer", action="store_true", help="use distance loss for pre lm layer")
+    parser.add_argument("--use_distance_loss_post_lm_layer", action="store_true", help="use distance loss for post lm layer") # this is the current default behaviour , needs to be changed
+    parser.add_argument("--generate_after_training", action="store_true", help="generate summaries after training")
+    parser.add_argument("--use_last_layer_gating", action="store_true", help="use gating on lm layer")
+    parser.add_argument("--use_feature_level_gating", action="store_true", help="use gating on feature level(After 8th layer of decoder)")
+    parser.add_argument("--generation_output_directory", type = str, default = None, help = "directory to save generated summaries")
+    parser.add_argument("--current_epoch", type = int, default = 0, help = "current epoch number") # this is used to for restarting from the right checkpoint 
+    
+
+
 
     # divergence for now can be only kl or cosine
     # divergence weight is the amount of weight to give the loss 
     args = parser.parse_args()
+    print(args.generation_output_directory)
 
     #intialize wandb
     wandb.init(project="hydra-sum", name=args.experiment_name)
@@ -799,6 +831,9 @@ def main():
         train(args, train_dataset, eval_dataset, model, tokenizer)
         print('Done training..')
         print('Evaluating on val set..')
+        #if args.generate_after_training:
+        #    print("start evaluation")
+        #    evaluate(args, eval_dataset, model, tokenizer, 'test')
         #evaluate(args, eval_dataset, model, tokenizer, 'dev')
 
 

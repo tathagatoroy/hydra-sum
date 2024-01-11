@@ -233,6 +233,14 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
             gate_prob=None,
             use_sentence_gate_supervision=False,
             sent_gate=None,
+            use_one_head_distance_loss=False,
+            use_distance_loss_pre_lm_layer = False,
+            use_distance_loss_post_lm_layer = False,
+            use_last_layer_gating=False,
+            use_feature_level_gating=False,
+
+
+
             **unused,
     ):
         if "lm_labels" in unused:
