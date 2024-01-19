@@ -369,8 +369,8 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
                     f_out.write('\n')
 
                 batch_num += 1
-                if not args.do_eval and batch_num >= 40:
-                    break
+                #if not args.do_eval and batch_num >= 40:
+                #    break
 
             f_out.close()
 
