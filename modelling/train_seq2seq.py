@@ -26,6 +26,7 @@ import multi_head_utils
 from torch import nn
 import wandb
 import time
+import gc
 from transformers import (
     AdamW,
     PreTrainedModel,
@@ -398,7 +399,6 @@ def evaluate_and_save_model(args, eval_dataset, model, tokenizer, global_step, m
 
     #return max_ppl
 
-#@profile
 def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer):
     """ Train the model """
     print("starting training function")
@@ -538,8 +538,15 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
                 #log the 3 losses
             if args.use_mixed and args.divergence_loss is not None:
                     outputs, divergence_loss , masked_lm_loss = model(**inputs)
-                    wandb.log({"divergence_loss": divergence_loss, "masked_lm_loss": masked_lm_loss, "total_loss": outputs.loss.item()})
+                    #wandb.log({"divergence_loss": divergence_loss, "masked_lm_loss": masked_lm_loss, "total_loss": outputs.loss.item()})
+                    #print("divergence loss : " + str(divergence_loss))
+                    #print("masked lm loss : " + str(masked_lm_loss))
+                    if step % 1000 == 0:
+                        print("divergence loss : " + str(divergence_loss))
+                        print("masked lm loss : " + str(masked_lm_loss))
+                        print("total loss : " + str(outputs.loss.item()))
 
+ 
                 
 
             elif args.use_gate_supervision:
@@ -556,10 +563,10 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
 
             #print(loss)
 
-            tr_loss += loss.item()
+            tr_loss += loss.detach().item()
 
             if args.use_gate_supervision:
-                tr_gate_loss += gate_loss.item()
+                tr_gate_loss += gate_loss.detach().item()
                 loss += gate_loss
 
             if args.n_gpu > 1:
@@ -601,10 +608,12 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
 
                     # Evaluation  # should be str(global_step)
                     # evaluate_and_save_model(args, eval_dataset, model, tokenizer, str(num_epochs), max_ppl)
+            gc.collect()
 
             if 0 < args.max_steps < global_step:
                 epoch_iterator.close()
                 break
+
         #epoch done
         epoch_end_time = time.time()
         print("epoch time : " + str(epoch_end_time - epoch_start_time))
@@ -689,6 +698,7 @@ def main():
     )
     parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
     parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the test set.")
+    parser.add_argument("--do_test", action="store_true", help="Whether to run eval on the test set.")
     parser.add_argument("--per_gpu_train_batch_size", default=8, type=int, help="Batch size training.", )
     parser.add_argument("--per_gpu_eval_batch_size", default=8, type=int, help="Batch size evaluation.", )
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="No. steps before backward/update", )
@@ -744,9 +754,18 @@ def main():
     args = parser.parse_args()
     print(args.generation_output_directory)
 
+    #some validation stuff
+    if args.use_two_head_distance_loss is False and args.use_one_head_distance_loss is False:
+        args.use_two_head_distance_loss = True
+    if args.use_distance_loss_pre_lm_layer is False and args.use_distance_loss_post_lm_layer is False:
+        args.use_distance_loss_post_lm_layer = True
+    if args.use_last_layer_gating is False and args.use_feature_level_gating is False:
+        args.use_last_layer_gating = True
+
     #intialize wandb
-    wandb.init(project="hydra-sum", name=args.experiment_name)
-    wandb.config.update(args)
+    #wandb.init(project="hydra-sum", name=args.experiment_name)
+    #wandb.config.update(args)
+    print(args)
 
 
     if (
@@ -814,27 +833,37 @@ def main():
 
     logger.info("Training/evaluation parameters %s", args)
     #test_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'test')
-    train_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'train')
-    eval_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'dev')
+    #train_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'train')
+    train_dataset = None
+    eval_dataset = None
+    test_dataset = None
     if args.do_eval:
-        #test_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'test')
+        eval_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'dev')
         print("start evaluation")
-        evaluate(args, eval_dataset, model, tokenizer, 'test')
-
+        evaluate(args, eval_dataset, model, tokenizer, 'dev')
+        print("end evaluation")
     
-    #eval_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'dev')
-    #evaluate(args, eval_dataset, model, tokenizer, 'dev')
+    if args.do_test:
+        test_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'test')
+        print("start testing")
+        evaluate(args, test_dataset, model, tokenizer, 'test')
+        print("end testing")
+
+
+
+        
 
     if args.do_train:
-        print("start loading trainset with dataset size : {0}".format(len(train_dataset)))
+        train_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'train')
         print('Starting training..')
         train(args, train_dataset, eval_dataset, model, tokenizer)
         print('Done training..')
-        print('Evaluating on val set..')
         #if args.generate_after_training:
         #    print("start evaluation")
         #    evaluate(args, eval_dataset, model, tokenizer, 'test')
         #evaluate(args, eval_dataset, model, tokenizer, 'dev')
+    
+    print("Owari da")
 
 
 if __name__ == "__main__":

@@ -275,6 +275,7 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
 
         if use_mixed:
             outputs, outputs1, prob_head_selector = self.model.forward(**input_args)
+
             #this F.Linear computes the logits from the decoder output using a linear layer which is the same as the nn.Embedding weight
             #print("shape of outputs : {0} ".format(outputs[0].shape))
             #output shape is (B, L, D)
@@ -336,22 +337,22 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
         masked_lm_loss = None
         gate_loss = None
         if not generate:
-                        
+            #print(divergence_loss, use_distance_loss_post_lm_layer, use_distance_loss_pre_lm_layer, use_one_head_distance_loss, use_two_head_distance_loss)         
             if divergence_loss is not None:
                 if use_distance_loss_post_lm_layer:
                     if divergence_loss == 'kl':
                         if use_one_head_distance_loss:
                             softmax_0_detached = softmax_0.detach()
-                            divergence_loss = skld_loss(softmax_0_detached, softmax_1)
+                            divergence_loss_score = skld_loss(softmax_0_detached, softmax_1)
                         elif use_two_head_distance_loss:
-                            divergence_loss = skld_loss(softmax_0, softmax_1)
+                            divergence_loss_score = skld_loss(softmax_0, softmax_1)
                         #divergence_loss = skld_loss(softmax_0, softmax_1)
                     elif divergence_loss == 'cosine':
                         if use_one_head_distance_loss:
                             softmax_0_detached = softmax_0.detach()
-                            divergence_loss = cosine_similarity(softmax_0_detached, softmax_1)
+                            divergence_loss_score = cosine_similarity(softmax_0_detached, softmax_1)
                         elif use_two_head_distance_loss:
-                            divergence_loss = cosine_similarity(softmax_0, softmax_1)
+                            divergence_loss_score = cosine_similarity(softmax_0, softmax_1)
                         #divergence_loss = cosine_similarity(softmax_0, softmax_1)
                     else:
                         print(f'loss {divergence_loss} not implemented')
@@ -363,11 +364,11 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
                             feature_1 = outputs[0]
                             feature_2 = outputs1[0]
                             feature_1_detached = feature_1.detach()
-                            divergence_loss = skld_loss(feature_1_detached, feature_2)
+                            divergence_loss_score = skld_loss(feature_1_detached, feature_2)
                         elif use_two_head_distance_loss:
                             feature_1 = outputs[0]
                             feature_2 = outputs1[0]
-                            divergence_loss = skld_loss(feature_1, feature_2)
+                            divergence_loss_score = skld_loss(feature_1, feature_2)
 
                         #divergence_loss = skld_loss(softmax_0, softmax_1)
                     elif divergence_loss == 'cosine':
@@ -375,11 +376,11 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
                             feature_1 = outputs[0]
                             feature_2 = outputs1[0]
                             feature_1_detached = feature_1.detach()
-                            divergence_loss = cosine_similarity_on_features(feature_1_detached, feature_2)
+                            divergence_loss_score = cosine_similarity_on_features(feature_1_detached, feature_2)
                         elif use_two_head_distance_loss:
                             feature_1 = outputs[0]
                             feature_2 = outputs1[0]
-                            divergence_loss = cosine_similarity_on_features(feature_1, feature_2)
+                            divergence_loss_score = cosine_similarity_on_features(feature_1, feature_2)
 
                         #divergence_loss = cosine_similarity(softmax_0, softmax_1)
                     else:
@@ -391,7 +392,9 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
             loss_fct = nn.NLLLoss(ignore_index=1)
             masked_lm_loss = loss_fct(lm_logits.view(-1, self.config.vocab_size), lm_labels.view(-1))
             if use_mixed and divergence_loss is not None:
-                total_loss = masked_lm_loss + divergence_weight * divergence_loss
+                #print(divergence_loss_score, divergence_weight)
+                #print("here")
+                total_loss = masked_lm_loss + divergence_weight * divergence_loss_score
             # I am not using gate supervision here
             if use_mixed and use_gate_supervision:
                 #negative log likelyhood loss
@@ -420,7 +423,7 @@ class ConditionalGenerationCustomBartMultHeads(GenerationMixinCustom, BartPretra
                             encoder_attentions=outputs.encoder_attentions
                             )
                 
-            return return_output, divergence_loss, masked_lm_loss
+            return return_output, divergence_loss_score, masked_lm_loss
         
         else:
             return_output = Seq2SeqLMOutput(

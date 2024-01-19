@@ -39,20 +39,20 @@ echo "starting  starting 2 in the background"
 #get pid
 pid_3=$!
 
-#echo "starting  gpu 3 in the background"
-#./test_model_gpu_3.sh > ~/summarization/hydra-sum/modelling/gpu_3.log 2>&1 &
+echo "starting  gpu 3 in the background"
+./test_model_gpu_3.sh > ~/summarization/hydra-sum/modelling/gpu_3.log 2>&1 &
 #get pid
-#pid_4=$!
+pid_4=$!
 
 #echo all the pid
 echo "pid_1: $pid_1"
 echo "pid_2: $pid_2"
 echo "pid_3: $pid_3"
-#echo "pid_4: $pid_4"
+echo "pid_4: $pid_4"
 
 #wait for all pid
-#wait $pid_1 $pid_2 $pid_3 $pid_4
-wait $pid_1 $pid_2 $pid_3
+wait $pid_1 $pid_2 $pid_3 $pid_4
+#wait $pid_1 $pid_2 $pid_3 
 
 
 echo "all done"
