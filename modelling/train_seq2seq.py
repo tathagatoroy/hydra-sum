@@ -188,7 +188,7 @@ def evaluate(args, eval_dataset, model: PreTrainedModel, tokenizer: PreTrainedTo
     # I think this computes some probabilities of tokens
     if args.dump_posteriors:
         f_out = open(os.path.join(eval_output_dir, 'prob_out%s.txt' % prefix), 'w')
-
+        
     with torch.no_grad():
         # Loop through the data loader
         for batch in tqdm(eval_dataloader, desc="Evaluating"):
@@ -417,6 +417,7 @@ def train(args, train_dataset, eval_dataset, model: PreTrainedModel, tokenizer: 
         t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
     print("freezing layers in main")
     # freeze layers
+    model.train()
     model.freeze_weights()
 
     # Prepare optimizer and schedule (linear warmup and decay)
@@ -731,7 +732,7 @@ def main():
     parser.add_argument("--train_data_size", type=int, default=-1, help="size of training data")
     parser.add_argument("--eval_data_size", type=int, default=-1, help="size of eval data")
     parser.add_argument("--test_data_size", type=int, default=-1, help="size of test data")
-    parser.add_argument("--num_bins", type=int, default=10, help="number of bins for dividing the controllable scoring")
+    parser.add_argument("--num_bins", type=int, default=100, help="number of bins for dividing the controllable scoring")
     parser.add_argument("--divergence_loss", type = str, default = None , help = "divergence loss to use") # should be either kl or cosine
     parser.add_argument("--divergence_weight", type = float, default = 0.2, help = "weight for divergence loss")
     parser.add_argument("--experiment_name", type = str, default = "default", help = "name of the experiment")
@@ -745,6 +746,7 @@ def main():
     parser.add_argument("--use_feature_level_gating", action="store_true", help="use gating on feature level(After 8th layer of decoder)")
     parser.add_argument("--generation_output_directory", type = str, default = None, help = "directory to save generated summaries")
     parser.add_argument("--current_epoch", type = int, default = 0, help = "current epoch number") # this is used to for restarting from the right checkpoint 
+
     
 
 
@@ -753,6 +755,20 @@ def main():
     # divergence weight is the amount of weight to give the loss 
     args = parser.parse_args()
     print(args.generation_output_directory)
+
+    if args.generate is True and args.use_head is not None:
+        if args.use_head == 0:
+            args.output_dir = os.path.join(args.output_dir, "head_0")
+            args.generation_output_directory = os.path.join(args.generation_output_directory, "head_0")
+        elif args.use_head == 1:
+            args.output_dir = os.path.join(args.output_dir, "head_1")
+            args.generation_output_directory = os.path.join(args.generation_output_directory, "head_1")
+    if args.generate is True and args.gate_probability is not None:
+        args.output_dir = os.path.join(args.output_dir, "gate_prob_" + str(args.gate_probability))
+        args.generation_output_directory = os.path.join(args.generation_output_directory, "gate_prob_" + str(args.gate_probability))
+
+    print(args.generation_output_directory)
+    print(args.output_dir)
 
     #some validation stuff
     if args.use_two_head_distance_loss is False and args.use_one_head_distance_loss is False:
@@ -807,11 +823,12 @@ def main():
         print("from args.input_dir : " + str(args.input_dir))
         tokenizer = tokenizer_class.from_pretrained(args.input_dir)
         model = model_class.from_pretrained(args.input_dir)
+        print("model and tokenizer loaded")
 
         if args.model_type in ['bart_mult_heads_2', 'pegasus_mult_heads', 'bart_mult_heads_3']:
             args_saved = torch.load(os.path.join(args.input_dir, 'training_args.bin'))
             model.model.num_decoder_layers_shared = args_saved.num_decoder_layers_shared  # fix in old models
-            print(args_saved.num_decoder_layers_shared)
+            #print(args_saved.num_decoder_layers_shared)
 
     else:
         config = config_class.from_pretrained(args.model_name_or_path)
@@ -829,7 +846,10 @@ def main():
             args.use_mixed = True  # Set this as true for training, evaluation can be controlled
             model.initialize_correct_weights(config, num_decoder_layers_shared=args.num_decoder_layers_shared)
 
-    model.to(args.device)
+    print("sending the model to : {0}".format(args.device))
+    #model.to(args.device)
+    model.cuda()
+    print("model sent to : {0}".format(args.device))
 
     logger.info("Training/evaluation parameters %s", args)
     #test_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'test')
@@ -844,7 +864,9 @@ def main():
         print("end evaluation")
     
     if args.do_test:
+        
         test_dataset = train_seq2seq_utils.load_and_cache_examples(args, tokenizer, 'test')
+        print("size of the test_dataset : {0}".format(len(test_dataset)))
         print("start testing")
         evaluate(args, test_dataset, model, tokenizer, 'test')
         print("end testing")

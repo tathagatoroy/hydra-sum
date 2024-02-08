@@ -11,6 +11,7 @@ from nltk import sent_tokenize
 import pandas as pd
 import tqdm
 from nltk import word_tokenize, ngrams
+import numpy as np
 
 
 def get_overlap(inp, out, ngram=2):
@@ -126,6 +127,18 @@ def convert_abs_score_to_int(abs_score, num_bins):
             return i
     return num_bins - 1
 
+def convert_abs_score_to_gaussian_vector(abs_score, sigma = 0.1 , num_bins = 100):
+    """ given a number between 0 and 1, convert it to a gaussian vector of size num_bins such that it is a 1D gaussian with mean at abs_score and std dev """
+    #def gaussian_vector(abs_score, sigma=0.1 , num_bins = 100):
+    # Create a Gaussian distribution centered at the scalar value
+    #print(np.arange(num_bins)/num_bins)
+    gaussian_values = np.exp(-(((np.arange(num_bins)/num_bins) - abs_score) ** 2) / (2 * sigma ** 2))
+    # Normalize the values to sum up to 1
+    normalized_values = gaussian_values / np.sum(gaussian_values)
+    return normalized_values
+
+
+
 
 def convert_examples_to_features(examples, tokenizer, max_length=512, max_decoder_length=128, num_bins=10):
     print("converting examples to features")
@@ -147,7 +160,8 @@ def convert_examples_to_features(examples, tokenizer, max_length=512, max_decode
         output = example['summary']
         id = example['id']
         overlap = get_overlap(input, output)
-        overlap_bin = convert_abs_score_to_int(overlap, num_bins)
+        #overlap_bin = convert_abs_score_to_int(overlap, num_bins)
+        overlap_bin = convert_abs_score_to_gaussian_vector(overlap, sigma = 0.1 , num_bins = num_bins)
         #abs_score = example['overlap']
 
         # convert abs to int for nn.embedding layer
@@ -340,6 +354,10 @@ def load_and_cache_examples(args, tokenizer, split, num_bins=10):
             str(args.max_seq_length)
         ),
     )
+    print("cache data file : {0}".format(cached_features_file))
+
+
+
 
     # Load features from cache if available and not overwritten
     if os.path.exists(cached_features_file) and not args.overwrite_cache:

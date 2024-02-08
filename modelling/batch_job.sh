@@ -1,24 +1,23 @@
 #!/bin/bash
 #SBATCH -A research
-#SBATCH -n 39
+#SBATCH -n 37
 #SBATCH --gres=gpu:4
 #SBATCH --mem-per-cpu=3000M
 #SBATCH --time=4-00:00:00
-#SBATCH --job-name=all_experiments
-#SBATCH --output=hyperparameter_search.out
+#SBATCH --job-name=inference_experiments
+#SBATCH --output=inference_gate_prob.out
 #SBATCH --mail-user=tathagato.roy@research.iiit.ac.in
 #SBATCH --mail-type=BEGIN
 #SBATCH --mail-type=END
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-type=REQUEUE
 #SBATCH --mail-type=ALL
-5
-
+#SBATCH -w gnode001
 
 
 
 # Discord notifs on start and end
-source notify
+#source notify
 
 # Fail on error
 
@@ -31,13 +30,20 @@ source notify
 # Activate Conda environment
 echo "Activating Conda Environment Virtual Environment"
 source /home2/tathagato/miniconda3/bin/activate habitat
-
-#scp -r gnode055:/scratch/tathagato /scratch/
-./train_run.sh
+#echo "copying data"
+#scp -r gnode057:/scratch/tathagato /scratch/
+#echo "data copying done"
+#./train_run.sh
 #./test_model.sh
 #./test_model_gpu_0.sh
-#i./test_model_gpu_1.sh
+#./test_model_gpu_1.sh
+echo "running script"
 #./run_script.sh
+#./train_run.sh
+#./run_script.sh
+./test_script.sh
+
+
 
 
 
